@@ -1,13 +1,12 @@
 package com.example.redis_example.service;
 
 import java.time.LocalDateTime;
-
-import org.apache.el.stream.Optional;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.web.server.ResponseStatusException;
 
+import com.example.redis_example.queue.ClickEventQueue;
 import com.example.redis_example.entity.AdClick;
 import com.example.redis_example.entity.Advertisments;
 import com.example.redis_example.repo.AdClickRepository;
@@ -18,11 +17,11 @@ import jakarta.servlet.http.HttpServletRequest;
 @Service
 public class ClickService {
 
-    @Autowired
-    private AdClickRepository repository;
+    private final ClickEventQueue queue;
 
-    @Autowired
-    private AdsRepository repo;
+    public ClickService(ClickEventQueue queue) {
+        this.queue = queue;
+    }
 
     /*
      * This service is:
@@ -44,36 +43,24 @@ public class ClickService {
             click.setUserAgent(request.getHeader("User-Agent"));
             click.setClickedAt(LocalDateTime.now());
 
-            /*
-             * Why redirect after saving click?
-             * Because:
-             * Advertiser only sees real user traffic
-             * You track every click
-             * Analytics is accurate
-             */
-            // normally fetched from DB
-
-            Advertisments ads = repo.findById(adId)
-                    .orElseThrow(() -> new ResponseStatusException(
-                            HttpStatus.NOT_FOUND,
-                            "Ad not found for id: " + adId));
-
-            redirectUrl = ads.getRedirectURL();
-            /*
-             * Why DB is slow:
-             * Network IO
-             * Disk fsync
-             * Locks
-             * Even a fast DB write costs 5–20 ms.
-             * At 100k clicks/sec → impossible.
-             */
-            click.setRedirectUrl(redirectUrl);
-            repository.save(click);
+            queue.add(click);
 
         } catch (Exception e) {
             System.err.println(e);
         }
         return redirectUrl;
     }
+    /*
+     * Queue capacity = 100,000
+     * Batch size = 1000
+     * Scheduler = every 100 ms
+     * 
+     * #### Scenario: 10,000 requests/sec
+     * 
+     * ```
+     * 0 ms → 1000 events added
+     * 100 ms → scheduler drains 1000 → DB insert
+     * 200 ms → drains next 1000
+     */
 
 }

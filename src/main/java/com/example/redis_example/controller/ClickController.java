@@ -49,3 +49,25 @@ public class ClickController {
  * 
  * Measure DB vs cache latency separately
  */
+/*
+ * Yes — **almost right**. Short and precise correction 👇
+ ** 
+ * Actual flow:**
+ * 
+ * 1️⃣ Request comes in (filter for oneUserperrequest window using redis)
+ * 2️⃣ **Redirect URL is fetched synchronously** (Redis cache → DB fallback(if
+ * the redirect url not present in database))
+ * 3️⃣ **Click event is enqueued asynchronously** into `BlockingQueue` (capacity
+ * = 100,000)
+ * 4️⃣ **User is redirected immediately (302)**
+ * 5️⃣ **Every 100 ms**, the scheduler drains a batch from the queue and inserts
+ * into DB
+ ** 
+ * Key clarification:**
+ * 
+ * Queue capacity **limits memory**, it does **not** trigger batching
+ * Batch insert timing is controlled by the **scheduler (100 ms)**
+ * 
+ * ✔ Redirect is never delayed by DB insert
+ * ✔ DB writes happen fully in background
+ */
