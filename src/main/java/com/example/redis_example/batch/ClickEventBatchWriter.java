@@ -23,7 +23,7 @@ public class ClickEventBatchWriter {
         this.repository = repository;
     }
 
-    // The queue can hold at most 100,000 click events at any given time.
+    //Every 100 ms | Drains up to 1000 events | Saves them in one DB transaction
     @Scheduled(fixedDelay = 100) // every 100 ms
     @Transactional
     public void writeBatch() {
