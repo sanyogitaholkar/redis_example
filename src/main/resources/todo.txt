@@ -1,0 +1,302 @@
+Redis Streams consumer
+Kafka producer + consumer,
+Async version with Kafka
+Fraud detection logic
+Duplicate click prevention with Redis
+Edge-level click handling (Nginx + Lua)
+show me all these 
+
+Excellent — this is **real ad-tech / high-scale system design**.
+I’ll show you **how all of these fit together**, with **clear architecture + minimal but real code** so you understand **what runs where and why**.
+
+We’ll build this in **layers**, exactly like production systems (Google Ads / Meta).
+
+---
+
+# 🏗️ HIGH-LEVEL ARCHITECTURE
+
+```
+[ User ]
+   |
+   v
+[ NGINX + Lua ]  (edge filtering, dedupe, ultra-fast)
+   |
+   v
+[ Click API (Spring Boot) ]
+   |
+   ├── Redis (dedupe + rate limit)
+   ├── Kafka Producer (async)
+   |
+   v
+[ Kafka Topic: ad-clicks ]
+   |
+   ├── Fraud Detection Consumer
+   ├── Analytics Consumer
+   └── Redis Stream Consumer (optional)
+```
+
+---
+
+# 1️⃣ Duplicate Click Prevention (Redis – FIRST LINE OF DEFENSE)
+
+### Goal
+
+> Same user clicking same ad within 1 minute → **count only once**
+
+### Redis key
+
+```
+click:dedupe:{userIp}:{adId}
+```
+
+### Logic
+
+```java
+Boolean isFirstClick = redisTemplate.opsForValue()
+    .setIfAbsent(key, "1", 60, TimeUnit.SECONDS);
+
+if (!Boolean.TRUE.equals(isFirstClick)) {
+    // Duplicate click → ignore or flag
+}
+```
+
+✅ O(1)
+✅ Distributed
+✅ Extremely fast
+
+---
+
+# 2️⃣ Kafka (ASYNC Click Processing)
+
+## Kafka Topic
+
+```
+ad-clicks
+```
+
+---
+
+## Kafka Producer (Spring Boot)
+
+### Dependency
+
+```xml
+<dependency>
+  <groupId>org.springframework.kafka</groupId>
+  <artifactId>spring-kafka</artifactId>
+</dependency>
+```
+
+### Producer Code
+
+```java
+@Service
+public class ClickEventProducer {
+
+    @Autowired
+    private KafkaTemplate<String, ClickEvent> kafkaTemplate;
+
+    public void sendClick(ClickEvent event) {
+        kafkaTemplate.send("ad-clicks", event.getUserIp(), event);
+    }
+}
+```
+
+### ClickEvent DTO
+
+```java
+public class ClickEvent {
+    public Long adId;
+    public Long campaignId;
+    public String userIp;
+    public String userAgent;
+    public long timestamp;
+}
+```
+
+---
+
+## Controller (ASYNC)
+
+```java
+producer.sendClick(clickEvent);
+return ResponseEntity.status(302).location(URI.create(url)).build();
+```
+
+⚡ User is redirected immediately
+⚡ DB work is async
+
+---
+
+# 3️⃣ Kafka Consumer (Fraud Detection)
+
+## Fraud patterns
+
+* Too many clicks from same IP
+* Multiple ads clicked in short time
+* Same user-agent across many IPs
+
+---
+
+### Consumer Code
+
+```java
+@KafkaListener(topics = "ad-clicks", groupId = "fraud-detector")
+public void detectFraud(ClickEvent event) {
+
+    String key = "fraud:ip:" + event.userIp;
+    Long count = redisTemplate.opsForValue().increment(key);
+
+    if (count == 1) {
+        redisTemplate.expire(key, 10, TimeUnit.MINUTES);
+    }
+
+    if (count > 100) {
+        // Mark IP as fraudulent
+        redisTemplate.opsForSet().add("fraud:ips", event.userIp);
+    }
+}
+```
+
+---
+
+# 4️⃣ Redis Streams Consumer (Alternative to Kafka)
+
+Used when:
+
+* Kafka is too heavy
+* You want Redis-only infra
+
+---
+
+### Producer
+
+```java
+redisTemplate.opsForStream().add(
+    StreamRecords.newRecord()
+        .ofObject(clickEvent)
+        .withStreamKey("click-stream")
+);
+```
+
+### Consumer
+
+```java
+@Scheduled(fixedDelay = 1000)
+public void consume() {
+    List<MapRecord<String, Object, Object>> messages =
+        redisTemplate.opsForStream().read(
+            Consumer.from("group1", "consumer1"),
+            StreamReadOptions.empty().count(10),
+            StreamOffset.create("click-stream", ReadOffset.lastConsumed())
+        );
+
+    // process messages
+}
+```
+
+---
+
+# 5️⃣ Edge-Level Click Handling (NGINX + LUA) 🚀
+
+This is **how big ad networks survive traffic spikes**.
+
+---
+
+## NGINX Lua Script
+
+```lua
+local redis = require "resty.redis"
+local red = redis:new()
+
+red:connect("127.0.0.1", 6379)
+
+local ip = ngx.var.remote_addr
+local adId = ngx.var.arg_adId
+
+local key = "edge:click:" .. ip .. ":" .. adId
+
+local exists = red:get(key)
+if exists ~= ngx.null then
+    return ngx.exit(429)
+end
+
+red:setex(key, 60, "1")
+
+-- Forward to backend
+```
+
+### Benefits
+
+* 🔥 Drops bad traffic **before Spring Boot**
+* 🔥 Handles millions of QPS
+* 🔥 Saves backend cost
+
+---
+
+# 6️⃣ Sliding Window Rate Limiting (User = 1 click/min)
+
+Already implemented, but now layered:
+
+| Layer          | Purpose             |
+| -------------- | ------------------- |
+| NGINX          | First dedupe        |
+| Redis          | Accurate dedupe     |
+| Kafka          | Async processing    |
+| Fraud Consumer | Long-term detection |
+
+---
+
+# 7️⃣ COMPLETE FLOW (IMPORTANT)
+
+```
+User clicks
+ ↓
+NGINX Lua → duplicate? DROP
+ ↓
+Spring Filter → sliding window
+ ↓
+Redis dedupe → prevent double count
+ ↓
+Kafka → async event
+ ↓
+Redirect user
+ ↓
+Kafka Consumer → fraud + analytics
+```
+
+---
+
+# 8️⃣ Why this is production-grade
+
+✅ Low latency (sub-10ms)
+✅ Horizontally scalable
+✅ Async DB writes
+✅ Multi-layer fraud protection
+✅ Edge + backend enforcement
+
+---
+
+# 9️⃣ Interview-ready explanation (MEMORIZE)
+
+> “Clicks are handled at the edge using NGINX Lua for fast deduplication. The backend applies Redis-based sliding window limits and publishes click events to Kafka. Consumers asynchronously perform fraud detection and analytics, ensuring low latency redirects while maintaining accurate click counts.”
+
+---
+
+# 🔥 What I can show next (choose)
+
+1️⃣ Full **Docker setup** (Redis + Kafka + Spring)
+2️⃣ **System design diagram** (interview-ready)
+3️⃣ **Exactly-once click counting**
+4️⃣ **Real ad-tech fraud rules**
+5️⃣ **How Google Ads does this**
+
+Just tell me which one 👇
+
+
+check : 
+Different limits per ad
+
+Per-user + global limits combined
+
+Sliding window implemented with Redis sorted sets
